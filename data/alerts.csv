@@ -1,0 +1,5 @@
+ts,severity,rule,subject,confidence,evidence_url,meta
+2025-08-10T11:24:00Z,critical,inflow_spike,Inflow spike via Stargate → Aerodrome,0.86,https://example.com/tx-1,"chain=base; window=30m; amount_usd=142300"
+2025-08-09T11:24:00Z,warning,domain_match,New impersonation domain: aer0drome.app,0.82,https://example.com/urlscan/aer0drome,"registrar=Namecheap; ssl=Let's Encrypt"
+2025-08-09T19:20:00Z,info,social_spike,Social mentions up 3.1× on X (2h window),0.68,https://example.com/dashboard/social,"posts>=30; diversified_authors=yes"
+2025-08-08T22:01:00Z,warning,liquidity_delta,Liquidity change >5% in pool GMX/ETH,0.71,https://example.com/pool/gmx,"delta_pct=6.2"
