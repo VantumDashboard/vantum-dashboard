@@ -1,0 +1,9 @@
+ts,chain,entity,dir,window,amount_usd,p95_baseline,zscore,evidence_url
+2025-08-10T11:24:00Z,base,Stargate,in,30m,142300,88900,1.6,https://example.com/tx-1
+2025-08-10T10:50:00Z,base,Binance,out,30m,76000,50000,1.52,https://example.com/tx-2
+2025-08-09T19:20:00Z,arbitrum,GMX,in,24h,225000,170000,1.32,https://example.com/tx-3
+2025-08-09T15:15:00Z,base,LayerZero Bridge,in,24h,510000,300000,1.70,https://example.com/tx-4
+2025-08-10T09:05:00Z,solana,Jupiter Router,in,30m,98000,65000,1.51,https://example.com/tx-5
+2025-08-08T22:01:00Z,arbitrum,MM Cluster A,out,24h,130000,90000,1.44,https://example.com/tx-6
+2025-08-08T17:40:00Z,base,Aerodrome LP,out,24h,94000,70000,1.34,https://example.com/tx-7
+2025-08-07T13:10:00Z,solana,CEX Hot Wallet,in,24h,155000,110000,1.41,https://example.com/tx-8
