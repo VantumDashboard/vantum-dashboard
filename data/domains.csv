@@ -1,0 +1,4 @@
+domain,matched_term,first_seen,risk_flag,linked_from_social,registrar,ssl_issuer,urlscan_url
+aer0drome.app,aerodrome,2025-08-09T11:24:00Z,true,true,Namecheap,Let's Encrypt,https://example.com/urlscan/aer0drome
+gmx-trade-support.net,gmx,2025-08-08T16:10:00Z,true,false,GoDaddy,Sectigo,https://example.com/urlscan/gmx-support
+aerodrome-docs.io,aerodrome,2025-08-07T10:00:00Z,false,false,Cloudflare,Let's Encrypt,https://example.com/urlscan/aerodrome-docs
