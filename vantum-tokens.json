@@ -1,0 +1,36 @@
+{
+  "brand": {
+    "night_900": "#0A0E14",
+    "slate_800": "#121923",
+    "graphite_600": "#1E2A36",
+    "mist_100": "#EAF0F6",
+    "white": "#FFFFFF"
+  },
+  "accent": {
+    "neon_teal": "#2DE2E6",
+    "electric_purple": "#8A63F8",
+    "signal_magenta": "#D83BD2"
+  },
+  "status": {
+    "success": "#00C389",
+    "warning": "#FFB020",
+    "critical": "#FF3B3B",
+    "info": "#1EA7FD"
+  },
+  "series": {
+    "s1": "#2DE2E6",
+    "s2": "#8A63F8",
+    "s3": "#00C389",
+    "s4": "#FFB020",
+    "s5": "#D83BD2",
+    "s6": "#1EA7FD"
+  },
+  "gradient": {
+    "neon_to_purple": ["#2DE2E6", "#8A63F8"]
+  },
+  "typography": {
+    "headings": "Space Grotesk, Inter, Arial, sans-serif",
+    "body": "Inter, Arial, sans-serif",
+    "mono": "JetBrains Mono, Consolas, monospace"
+  }
+}
