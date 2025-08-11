@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="160" viewBox="0 0 720 160" role="img" aria-label="Vantum wordmark">
+  <defs>
+    <linearGradient id="vantum-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2DE2E6"/>
+      <stop offset="100%" stop-color="#8A63F8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Transparent background -->
+  <rect width="720" height="160" fill="none"/>
+
+  <!-- Stylized V -->
+  <g fill="url(#vantum-grad)">
+    <path d="M20 16 L44 16 L88 144 L68 144 Z"/>
+    <path d="M116 16 L140 16 L92 144 L72 144 Z"/>
+  </g>
+
+  <!-- 'antum' text -->
+  <text x="170" y="116"
+        fill="#EAF0F6"
+        font-family="Space Grotesk, Inter, Arial, sans-serif"
+        font-size="96"
+        font-weight="700"
+        letter-spacing="0.02em">
+    antum
+  </text>
+</svg>
