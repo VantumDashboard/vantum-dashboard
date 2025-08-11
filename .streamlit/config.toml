@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#2DE2E6"             # Neon Teal
+backgroundColor = "#0A0E14"          # Night 900
+secondaryBackgroundColor = "#121923" # Slate 800
+textColor = "#EAF0F6"                # Mist 100
+font = "sans serif"                  # We'll keep fonts simple here
