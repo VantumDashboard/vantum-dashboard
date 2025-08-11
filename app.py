@@ -4,6 +4,14 @@ from datetime import datetime, timezone
 
 st.set_page_config(page_title="Vantum — Crypto Threats & Growth Intelligence (Demo)", layout="wide")
 
+from pathlib import Path
+import streamlit as st
+
+if Path("vantum-wordmark.svg").exists():
+    st.image("vantum-wordmark.svg", width=260)
+else:
+    st.title("Vantum — Crypto Threats & Growth Intelligence")
+
 st.title("Vantum — Crypto Threats & Growth Intelligence (Demo)")
 st.caption("Demo dashboard with sample data. Edit the CSV files in the data/ folder to update the demo anytime.")
 
