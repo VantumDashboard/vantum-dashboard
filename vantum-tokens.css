@@ -1,0 +1,34 @@
+:root {
+  /* Brand */
+  --vantum-night-900: #0A0E14;
+  --vantum-slate-800: #121923;
+  --vantum-graphite-600: #1E2A36;
+  --vantum-mist-100: #EAF0F6;
+  --vantum-white: #FFFFFF;
+
+  /* Accent */
+  --vantum-neon-teal: #2DE2E6;
+  --vantum-electric-purple: #8A63F8;
+  --vantum-signal-magenta: #D83BD2;
+
+  /* Status */
+  --vantum-success: #00C389;
+  --vantum-warning: #FFB020;
+  --vantum-critical: #FF3B3B;
+  --vantum-info: #1EA7FD;
+
+  /* Series */
+  --vantum-series-1: #2DE2E6;
+  --vantum-series-2: #8A63F8;
+  --vantum-series-3: #00C389;
+  --vantum-series-4: #FFB020;
+  --vantum-series-5: #D83BD2;
+  --vantum-series-6: #1EA7FD;
+}
+
+/* Example utility classes (optional) */
+.bg-dark { background: var(--vantum-night-900); color: var(--vantum-mist-100); }
+.card { background: var(--vantum-slate-800); border: 1px solid var(--vantum-graphite-600); border-radius: 8px; }
+.badge-critical { background: var(--vantum-critical); color: var(--vantum-white); border-radius: 8px; padding: 2px 8px; font-size: 12px; }
+.badge-warning { background: var(--vantum-warning); color: var(--vantum-night-900); border-radius: 8px; padding: 2px 8px; font-size: 12px; }
+.badge-info { border: 1px solid var(--vantum-neon-teal); color: var(--vantum-neon-teal); border-radius: 8px; padding: 2px 8px; font-size: 12px; }
