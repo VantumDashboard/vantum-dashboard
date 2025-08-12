@@ -49,6 +49,9 @@ SLACK_WEBHOOK = SECRETS.get("alerts", {}).get("SLACK_WEBHOOK", "")
 DISCORD_WEBHOOK = SECRETS.get("alerts", {}).get("DISCORD_WEBHOOK", "")
 ZAPIER_WEBHOOK = SECRETS.get("alerts", {}).get("ZAPIER_WEBHOOK", "")
 
+# Optional: dashboard link to include in alert messages
+DASHBOARD_URL = SECRETS.get("app", {}).get("DASHBOARD_URL", "")
+
 # ---------- Chain constants ----------
 CHAIN_IDS = {
     "base": 8453,
@@ -71,6 +74,15 @@ SCAN_TX_BASE = {
     "ethereum": "https://etherscan.io/tx/",
     "polygon": "https://polygonscan.com/tx/",
     "optimism": "https://optimistic.etherscan.io/tx/",
+}
+
+# Optional address page links for evidence fallback
+SCAN_ADDR_BASE = {
+    "base": "https://basescan.org/address/",
+    "arbitrum": "https://arbiscan.io/address/",
+    "ethereum": "https://etherscan.io/address/",
+    "polygon": "https://polygonscan.com/address/",
+    "optimism": "https://optimistic.etherscan.io/address/",
 }
 
 STABLE_TOKENS = {"USDC", "USDBC", "USDC.E", "USDT", "DAI", "USD+"}
@@ -122,6 +134,7 @@ st.sidebar.title("Alerts")
 dest = "Slack" if SLACK_WEBHOOK else ("Zapier" if ZAPIER_WEBHOOK else ("Discord" if DISCORD_WEBHOOK else "None"))
 st.sidebar.caption(f"Destination: {dest}")
 auto_post = st.sidebar.checkbox("Auto-post spikes", value=False, key="auto_post")
+cooldown_min = st.sidebar.slider("Alert cooldown (minutes)", 15, 120, 60)
 st.sidebar.caption("Tip: add SLACK_WEBHOOK or ZAPIER_WEBHOOK to Secrets to enable posting.")
 
 with st.sidebar.expander("Debug"):
@@ -278,7 +291,12 @@ def build_flows_covalent(chain: str, addrs, hours_back: int) -> pd.DataFrame:
     df_out["dir"] = "out"
     df_out["entity"] = df_out["to_addr"]
 
-    return pd.concat([df_in, df_out], ignore_index=True)
+    out = pd.concat([df_in, df_out], ignore_index=True)
+    # De-duplicate likely repeats across multiple addresses
+    out = (out.sort_values("ts", ascending=False)
+              .drop_duplicates(subset=["tx_hash","from_addr","to_addr","amount_usd","chain"], keep="first")
+              .reset_index(drop=True))
+    return out
 
 def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
     eth_usd = get_eth_usd()
@@ -325,396 +343,4 @@ def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
             decimals = int(t.get("tokenDecimal", "18") or "18")
             raw = t.get("value", "0")
             try:
-                value = int(raw) / (10 ** decimals)
-            except Exception:
-                value = 0.0
-
-            contract = str(t.get("contractAddress", "")).lower()
-
-            if token_symbol in STABLE_TOKENS:
-                amount_usd = value
-            elif token_symbol in {"WETH", "ETH"}:
-                amount_usd = value * eth_usd
-            elif contract in wl_prices and wl_prices[contract] > 0:
-                amount_usd = value * wl_prices[contract]
-            else:
-                # Skip other tokens to avoid noisy USD estimates
-                continue
-
-            tx_hash = t.get("hash", "")
-            from_addr = (t.get("from", "") or "").lower()
-            to_addr = (t.get("to", "") or "").lower()
-            rows.append({"ts": ts, "tx_hash": tx_hash, "from_addr": from_addr, "to_addr": to_addr,
-                         "amount_usd": amount_usd, "chain": chain})
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-    df["from_addr"] = df["from_addr"].astype(str).str.lower()
-    df["to_addr"] = df["to_addr"].astype(str).str.lower()
-
-    df_in = df[df["to_addr"].isin(addrs_set)].copy()
-    df_in["dir"] = "in"
-    df_in["entity"] = df_in["from_addr"]
-
-    df_out = df[df["from_addr"].isin(addrs_set)].copy()
-    df_out["dir"] = "out"
-    df_out["entity"] = df_out["to_addr"]
-
-    return pd.concat([df_in, df_out], ignore_index=True)
-
-def detect_spikes(flows: pd.DataFrame, window_minutes: int, abs_threshold: float) -> pd.DataFrame:
-    """
-    Detect spikes and attach an evidence_url to a representative transaction per (chain, entity, dir) group.
-    """
-    if flows.empty:
-        return pd.DataFrame()
-    cutoff = pd.Timestamp.now(tz="UTC") - timedelta(minutes=window_minutes)
-    f = flows[flows["ts"] >= cutoff].copy()
-    if f.empty:
-        return pd.DataFrame()
-    g = f.groupby(["chain","entity","dir"], dropna=False)["amount_usd"].sum().reset_index()
-    g = g[g["amount_usd"] >= abs_threshold].copy()
-    if g.empty:
-        return pd.DataFrame()
-
-    # Pick a representative tx per group (max amount_usd)
-    evidence_urls = []
-    for _, row in g.iterrows():
-        chain = row["chain"]
-        entity = row["entity"]
-        direction = row["dir"]
-        sub = f[(f["chain"] == chain) & (f["entity"] == entity) & (f["dir"] == direction)]
-        if not sub.empty:
-            idx = sub["amount_usd"].astype(float).idxmax()
-            txh = str(sub.loc[idx, "tx_hash"]) if "tx_hash" in sub.columns else ""
-            base = SCAN_TX_BASE.get(chain, "")
-            evidence_urls.append(f"{base}{txh}" if base and txh else "")
-        else:
-            evidence_urls.append("")
-    g["evidence_url"] = evidence_urls
-
-    g["window"] = f"{window_minutes}m" if window_minutes < 120 else "24h"
-    g["ts"] = pd.Timestamp.now(tz="UTC")
-    g["p95_baseline"] = None
-    g["zscore"] = None
-    return g[["ts","chain","entity","dir","window","amount_usd","p95_baseline","zscore","evidence_url"]]
-
-@st.cache_data(ttl=300, show_spinner=False)
-def search_urlscan(terms, limit: int = 25) -> pd.DataFrame:
-    if not terms:
-        return pd.DataFrame()
-    results = []
-    headers = {"API-Key": URLSCAN_KEY} if URLSCAN_KEY else {}
-    for term in terms[:5]:
-        try:
-            q = f"https://urlscan.io/api/v1/search/?q={term}"
-            r = requests.get(q, headers=headers, timeout=20)
-            if r.status_code != 200:
-                continue
-            data = r.json() or {}
-            for res in data.get("results", [])[:limit]:
-                page = res.get("page", {})
-                task = res.get("task", {})
-                domain = page.get("domain", "")
-                urlscan_url = task.get("reportURL", "")
-                ts = task.get("time")
-                results.append({
-                    "domain": domain,
-                    "matched_term": term,
-                    "first_seen": ts,
-                    "risk_flag": True if term.lower() in str(domain).lower() else False,
-                    "linked_from_social": False,
-                    "registrar": "",
-                    "ssl_issuer": "",
-                    "urlscan_url": urlscan_url
-                })
-        except Exception:
-            continue
-    if not results:
-        return pd.DataFrame()
-    df = pd.DataFrame(results)
-    df["first_seen"] = pd.to_datetime(df["first_seen"], utc=True, errors="coerce")
-    return df.sort_values("first_seen", ascending=False).drop_duplicates(subset=["domain"])
-
-def build_alerts_from_spikes(spikes_30m: pd.DataFrame, spikes_24h: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    now = pd.Timestamp.now(tz="UTC")
-    for df, window in [(spikes_30m, "30m"), (spikes_24h, "24h")]:
-        if df is None or df.empty:
-            continue
-        for _, r in df.iterrows():
-            severity = "Critical" if r["amount_usd"] >= (abs_24h_usd if window=="24h" else abs_30m_usd) else "Warning"
-            confidence = 0.8 if severity == "Critical" else 0.7
-            subject = ("Inflow spike" if r["dir"] == "in" else "Outflow spike") + f" — {str(r['entity'])[:10]}… on {r['chain']}"
-            rows.append({
-                "ts": now,
-                "severity": severity,
-                "rule": "inflow_spike" if r["dir"]=="in" else "outflow_spike",
-                "subject": subject,
-                "confidence": confidence,
-                "evidence_url": r.get("evidence_url", ""),
-                "meta": json.dumps({"entity": r["entity"], "amount_usd": float(r["amount_usd"]), "window": window, "chain": r["chain"], "dir": r["dir"]})
-            })
-    return pd.DataFrame(rows)
-
-# ---------- Posting helpers ----------
-def _safe_post_json(url: str, payload: dict):
-    try:
-        r = requests.post(url, json=payload, timeout=15)
-        return r.status_code, (r.text or "")[:200]
-    except Exception as e:
-        return None, str(e)
-
-def post_slack(text: str):
-    if not SLACK_WEBHOOK:
-        return False, "No Slack webhook in Secrets"
-    code, msg = _safe_post_json(SLACK_WEBHOOK, {"text": text})
-    return bool(code and 200 <= code < 300), msg
-
-def post_discord(text: str):
-    if not DISCORD_WEBHOOK:
-        return False, "No Discord webhook in Secrets"
-    code, msg = _safe_post_json(DISCORD_WEBHOOK, {"content": text})
-    return bool(code and 200 <= code < 300), msg
-
-def post_zapier(payload: dict):
-    if not ZAPIER_WEBHOOK:
-        return False, "No Zapier webhook in Secrets"
-    code, msg = _safe_post_json(ZAPIER_WEBHOOK, payload)
-    return bool(code and 200 <= code < 300), msg
-
-def format_alert_text(row: dict) -> str:
-    sev = row.get("severity", "Warning")
-    rule = row.get("rule", "")
-    subject = row.get("subject", "")
-    meta = row.get("meta", "{}")
-    try:
-        meta_obj = json.loads(meta) if isinstance(meta, str) else (meta or {})
-    except Exception:
-        meta_obj = {}
-    chain = meta_obj.get("chain", "")
-    direction = meta_obj.get("dir", "")
-    window = meta_obj.get("window", "")
-    amount = meta_obj.get("amount_usd", 0)
-    entity = meta_obj.get("entity", "")
-    eurl = row.get("evidence_url", "")
-
-    prefix = ":rotating_light:" if sev.lower() == "critical" else ":warning:"
-    line1 = f"{prefix} {sev} {rule.replace('_',' ')} on {chain} ({window}) — ${amount:,.0f}"
-    line2 = f"Subject: {subject}"
-    line3 = f"Direction: {direction or '?'} | Entity: {entity or '?'}"
-    line4 = f"Evidence: {eurl}" if eurl else ""
-    return "\n".join([x for x in [line1, line2, line3, line4] if x])
-
-def send_alerts_df(alerts_df: pd.DataFrame) -> int:
-    if alerts_df is None or alerts_df.empty:
-        return 0
-    posted = 0
-    for _, r in alerts_df.iterrows():
-        row = r.to_dict()
-        text = format_alert_text(row)
-        # Unified payload for Zapier mapping
-        try:
-            meta_obj = json.loads(row.get("meta", "{}"))
-        except Exception:
-            meta_obj = {}
-        zap_payload = {
-            "channel": "#vantum-alerts",
-            "severity": row.get("severity"),
-            "rule": row.get("rule"),
-            "subject": row.get("subject"),
-            "chain": meta_obj.get("chain"),
-            "direction": meta_obj.get("dir"),
-            "window": meta_obj.get("window"),
-            "amount_usd": float(meta_obj.get("amount_usd", 0) or 0),
-            "entity": meta_obj.get("entity"),
-            "evidence_url": row.get("evidence_url"),
-            "ts": str(row.get("ts", pd.Timestamp.now(tz="UTC")))
-        }
-        ok = False
-        if SLACK_WEBHOOK:
-            ok, _ = post_slack(text)
-        elif ZAPIER_WEBHOOK:
-            ok, _ = post_zapier(zap_payload)
-        elif DISCORD_WEBHOOK:
-            ok, _ = post_discord(text)
-        else:
-            st.warning("No Slack, Zapier, or Discord webhook configured. Add one in Secrets.")
-            break
-        posted += 1 if ok else 0
-    return posted
-
-# ---------- Data sourcing ----------
-flows_recent = pd.DataFrame()
-if use_live and ADDRESSES and (has_covalent or has_scan):
-    flows_all = []
-    for ch in CHAINS:
-        # Prefer block explorers (better token transfer coverage); fall back to Covalent
-        if has_scan:
-            flows = build_flows_scan(ch, ADDRESSES, lookback_hours)
-        elif has_covalent:
-            flows = build_flows_covalent(ch, ADDRESSES, lookback_hours)
-        else:
-            flows = pd.DataFrame()
-        if not flows.empty:
-            flows_all.append(flows)
-    flows_recent = pd.concat(flows_all, ignore_index=True) if flows_all else pd.DataFrame()
-
-    # Spike detection computed from recent flows
-    fs_30 = detect_spikes(flows_recent, window_minutes=30, abs_threshold=abs_30m_usd)
-    fs_24 = detect_spikes(flows_recent, window_minutes=24*60, abs_threshold=abs_24h_usd)
-    flow_spikes = pd.concat([fs_30, fs_24], ignore_index=True) if (fs_30 is not None or fs_24 is not None) else pd.DataFrame()
-
-    brand_terms = BRAND_TERMS
-    domains = search_urlscan(brand_terms)
-
-    clusters = pd.DataFrame(columns=["cluster_id","chain","size","shared_funder","confidence","first_seen","last_seen","features"])
-    alerts = build_alerts_from_spikes(fs_30, fs_24)
-
-    # Auto-post if enabled (simple throttle to avoid spam)
-    if auto_post and not alerts.empty:
-        last = st.session_state.get("last_alert_post_ts")
-        now_ts = pd.Timestamp.now(tz="UTC")
-        if not last or (now_ts - last).total_seconds() > 120:
-            n = send_alerts_df(alerts)
-            if n > 0:
-                st.sidebar.success(f"Posted {n} alert(s) to {dest}.")
-                st.session_state["last_alert_post_ts"] = now_ts
-        else:
-            st.sidebar.caption("Auto-post cooling down (≤120s).")
-else:
-    # Demo fallback (if you don't have demo CSVs locally, these will be empty)
-    flow_spikes = load_csv("data/flow_spikes.csv")
-    clusters = load_csv("data/clusters.csv")
-    domains = load_csv("data/domains.csv")
-    alerts = load_csv("data/alerts.csv")
-
-# ---------- Filters ----------
-st.sidebar.title("Filters")
-default_chains = ["base", "arbitrum"]
-chains_set = set()
-if isinstance(flow_spikes, pd.DataFrame) and "chain" in flow_spikes.columns:
-    chains_set.update(flow_spikes["chain"].dropna().astype(str).str.lower().unique().tolist())
-if isinstance(clusters, pd.DataFrame) and "chain" in clusters.columns:
-    chains_set.update(clusters["chain"].dropna().astype(str).str.lower().unique().tolist())
-if isinstance(flows_recent, pd.DataFrame) and "chain" in flows_recent.columns:
-    chains_set.update(flows_recent["chain"].dropna().astype(str).str.lower().unique().tolist())
-available_chains = sorted(chains_set) or default_chains
-chains = st.sidebar.multiselect("Chains", available_chains, default=available_chains)
-
-# Filtered views
-fs = flow_spikes[flow_spikes["chain"].isin(chains)] if isinstance(flow_spikes, pd.DataFrame) and not flow_spikes.empty and "chain" in flow_spikes.columns else pd.DataFrame()
-cl = clusters[clusters["chain"].isin(chains)] if isinstance(clusters, pd.DataFrame) and not clusters.empty and "chain" in clusters.columns else pd.DataFrame()
-dm = domains.copy() if isinstance(domains, pd.DataFrame) else pd.DataFrame()
-al = alerts.copy() if isinstance(alerts, pd.DataFrame) else pd.DataFrame()
-fr = flows_recent[flows_recent["chain"].isin(chains)] if isinstance(flows_recent, pd.DataFrame) and not flows_recent.empty and "chain" in flows_recent.columns else pd.DataFrame()
-
-# ---------- KPIs ----------
-def num(x):
-    try:
-        return float(x)
-    except Exception:
-        return 0.0
-
-gross_in = fr.loc[fr.get("dir", pd.Series(dtype=str)).str.lower() == "in", "amount_usd"].apply(num).sum() if "dir" in fr.columns else 0.0
-gross_out = fr.loc[fr.get("dir", pd.Series(dtype=str)).str.lower() == "out", "amount_usd"].apply(num).sum() if "dir" in fr.columns else 0.0
-net_in = gross_in - gross_out
-active_clusters = len(cl) if not cl.empty else 0
-domains_flagged = int(pd.Series(dm["risk_flag"]).astype(bool).sum()) if ("risk_flag" in dm.columns and not dm.empty) else 0
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Net inflow (USD)", f"{net_in:,.0f}")
-col2.metric("Gross inflow (USD)", f"{gross_in:,.0f}")
-col3.metric("Active clusters", f"{active_clusters}")
-col4.metric("Domains flagged", f"{domains_flagged}")
-
-# ---------- Tabs ----------
-tab_overview, tab_flows, tab_domains, tab_alerts = st.tabs(
-    ["Overview", "Flows & Clusters", "Domains (Brand Safety)", "Recent Alerts"]
-)
-
-with tab_overview:
-    st.subheader("Top counterparties by net flow (lookback window)")
-    if not fr.empty and "entity" in fr.columns:
-        df = fr.copy()
-        df["amount_usd"] = pd.to_numeric(df["amount_usd"], errors="coerce").fillna(0.0)
-        df["in_usd"] = df.apply(lambda r: r["amount_usd"] if str(r.get("dir","")).lower()=="in" else 0.0, axis=1)
-        df["out_usd"] = df.apply(lambda r: r["amount_usd"] if str(r.get("dir","")).lower()=="out" else 0.0, axis=1)
-        top = df.groupby("entity", dropna=False).agg(in_usd=("in_usd","sum"),
-                                                     out_usd=("out_usd","sum"))
-        top["net_usd"] = top["in_usd"] - top["out_usd"]
-        st.dataframe(top.sort_values("net_usd", ascending=False).round(0).head(10), use_container_width=True)
-    else:
-        st.info("No live flow data found for the selected chains and lookback. Try increasing Lookback to 24–48h and confirm explorer/Covalent keys in Secrets.")
-
-with tab_flows:
-    st.subheader("Recent flow spikes")
-    if not fs.empty:
-        show_cols = [c for c in ["ts","chain","entity","dir","window","amount_usd","p95_baseline","zscore","evidence_url"] if c in fs.columns]
-        st.dataframe(fs.sort_values("ts", ascending=False)[show_cols], use_container_width=True)
-    else:
-        st.info("No flow spikes yet.")
-
-    st.subheader("Recent raw flows")
-    if not fr.empty:
-        show_cols_rf = [c for c in ["ts","chain","dir","entity","amount_usd","tx_hash"] if c in fr.columns]
-        st.dataframe(fr.sort_values("ts", ascending=False)[show_cols_rf].head(200), use_container_width=True)
-    else:
-        st.caption("No raw flows in this window.")
-
-    st.subheader("Wallet clusters")
-    if not cl.empty:
-        show_cols_c = [c for c in ["cluster_id","chain","size","shared_funder","confidence","first_seen","last_seen","features"] if c in cl.columns]
-        st.dataframe(cl.sort_values("confidence", ascending=False)[show_cols_c], use_container_width=True)
-    else:
-        st.info("Clusters will appear in Pro (deeper heuristics).")
-
-with tab_domains:
-    st.subheader("New domains and impersonations")
-    if not dm.empty:
-        show_cols_d = [c for c in ["domain","matched_term","first_seen","risk_flag","linked_from_social","registrar","ssl_issuer","urlscan_url"] if c in dm.columns]
-        st.dataframe(dm.sort_values("first_seen", ascending=False)[show_cols_d], use_container_width=True)
-    else:
-        st.info("No domain matches yet. Set client NAME or BRAND_TERMS_JSON in Secrets to help the search.")
-
-with tab_alerts:
-    st.subheader("Recent alerts")
-    if not al.empty:
-        show_cols_a = [c for c in ["ts","severity","rule","subject","confidence","evidence_url","meta"] if c in al.columns]
-        st.dataframe(al.sort_values("ts", ascending=False)[show_cols_a], use_container_width=True)
-    else:
-        st.info("No alerts in this window.")
-
-    # Send a manual test alert
-    if st.button("Send test alert to Slack/Zapier"):
-        test = pd.DataFrame([{
-            "ts": pd.Timestamp.now(tz="UTC"),
-            "severity": "Test",
-            "rule": "test_alert",
-            "subject": "Test alert from Vantum",
-            "confidence": 0.99,
-            "evidence_url": "",
-            "meta": json.dumps({"entity": "0x0000000000000000000000000000000000000000",
-                                "amount_usd": 12345,
-                                "window": "test",
-                                "chain": "base",
-                                "dir": "in"})
-        }])
-        n = send_alerts_df(test)
-        if n > 0:
-            st.success(f"Sent {n} test alert(s) to {dest}.")
-        else:
-            st.warning("No destination configured. Add SLACK_WEBHOOK or ZAPIER_WEBHOOK to Secrets.")
-
-# Footer
-st.markdown("—")
-cta = st.columns([3,1])[1]
-with cta:
-    st.subheader("Book a 2‑week pilot (£700)")
-    st.write(f"Email: {CONTACT_EMAIL}")
-    st.write("Includes live dashboard, alerts under 10 minutes, and a weekly 1‑page brief. If you don’t see value, don’t roll.")
-
-if show_disclaimer:
-    st.caption("Public data only. No investment advice. Sources and timestamps logged.")
+                value = int(raw) /
