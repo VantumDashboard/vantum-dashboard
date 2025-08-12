@@ -5,14 +5,14 @@ import requests
 from datetime import timedelta
 from pathlib import Path
 
-st.set_page_config(page_title="Crypto Threats & Growth Intelligence (MVP)", layout="wide")
+st.set_page_config(page_title="Vantum — Crypto Threats & Growth Intelligence (MVP)", layout="wide")
 
 # ---------- Branding ----------
 if Path("vantum-wordmark.svg").exists():
     st.image("vantum-wordmark.svg", width=260)
 
 st.title("Crypto Threats & Growth Intelligence")
-st.caption("Live MVP: pulls real on‑chain data")
+st.caption("Pulls real on‑chain data to configured to your project.")
 
 # ---------- Secrets / Config ----------
 SECRETS = st.secrets
@@ -20,6 +20,17 @@ CONTACT_EMAIL = SECRETS.get("contact", {}).get("EMAIL", "crypto@addprivacy.net")
 
 CLIENT_NAME = SECRETS.get("client", {}).get("NAME", "Demo Protocol")
 CHAINS = [c.strip().lower() for c in SECRETS.get("client", {}).get("CHAINS", "base").split(",") if c.strip()]
+
+# Optional: allow brand terms list via JSON; else default to first word of client name
+try:
+    BRAND_TERMS = json.loads(SECRETS.get("client", {}).get("BRAND_TERMS_JSON", "[]"))
+    if not isinstance(BRAND_TERMS, list):
+        BRAND_TERMS = []
+except Exception:
+    BRAND_TERMS = []
+if not BRAND_TERMS:
+    BRAND_TERMS = [CLIENT_NAME.split()[0]] if CLIENT_NAME else []
+
 try:
     CONTRACTS = json.loads(SECRETS.get("client", {}).get("CONTRACTS_JSON", "[]"))
 except Exception:
@@ -38,7 +49,7 @@ SLACK_WEBHOOK = SECRETS.get("alerts", {}).get("SLACK_WEBHOOK", "")
 DISCORD_WEBHOOK = SECRETS.get("alerts", {}).get("DISCORD_WEBHOOK", "")
 ZAPIER_WEBHOOK = SECRETS.get("alerts", {}).get("ZAPIER_WEBHOOK", "")
 
-# Basic chain IDs for Covalent
+# ---------- Chain constants ----------
 CHAIN_IDS = {
     "base": 8453,
     "arbitrum": 42161,
@@ -64,11 +75,29 @@ SCAN_TX_BASE = {
 
 STABLE_TOKENS = {"USDC", "USDBC", "USDC.E", "USDT", "DAI", "USD+"}
 
+# ---------- Token pricing for project token(s) ----------
+# Coingecko platform ids for token prices by chain
+COINGECKO_PLATFORMS = {
+    "base": "base",
+    "arbitrum": "arbitrum-one",
+    "ethereum": "ethereum",
+    "polygon": "polygon-pos",
+    "optimism": "optimistic-ethereum",
+}
+
+# Whitelisted project tokens we want USD prices for (by contract address, lowercase)
+# Aerodrome AERO on Base so flows to/from VotingEscrow/RewardsDistributor are valued
+WHITELIST_TOKENS = {
+    "base": {
+        "0x940181a94a35a4569e4529a3cdfb74e38fd98631": "AERO"
+    }
+}
+
 # ---------- Sidebar ----------
 st.sidebar.title("Get started")
 st.sidebar.markdown("**Book a 2‑week pilot (£700)**")
 st.sidebar.write(f"[Email us](mailto:{CONTACT_EMAIL}?subject=Vantum%20Pilot)")
-st.sidebar.checkbox("Show disclaimer", value=True, key="show_disclaimer")
+show_disclaimer = st.sidebar.checkbox("Show disclaimer", value=True, key="show_disclaimer")
 st.sidebar.divider()
 
 has_covalent = bool(COVALENT_KEY)
@@ -77,14 +106,14 @@ default_live = bool((has_covalent or has_scan) and ADDRESSES)
 st.sidebar.title("Live data")
 use_live = st.sidebar.checkbox("Use live on‑chain data", value=default_live)
 lookback_hours = st.sidebar.slider("Lookback (hours)", 2, 48, 24)
-abs_30m_usd = st.sidebar.number_input("30m spike threshold (USD)", min_value=10000, value=100000, step=10000)
-abs_24h_usd = st.sidebar.number_input("24h spike threshold (USD)", min_value=100000, value=500000, step=50000)
+abs_30m_usd = st.sidebar.number_input("30m spike threshold (USD)", min_value=1000, value=100000, step=5000)
+abs_24h_usd = st.sidebar.number_input("24h spike threshold (USD)", min_value=10000, value=500000, step=10000)
 
 if use_live:
-    if has_covalent:
-        st.sidebar.success("Data source: Covalent (auto)")
-    elif has_scan:
+    if has_scan:
         st.sidebar.success("Data source: Block explorers (BaseScan/Arbiscan)")
+    elif has_covalent:
+        st.sidebar.success("Data source: Covalent")
     else:
         st.sidebar.warning("No API keys found. Add Covalent or BaseScan/Arbiscan keys in Secrets.")
 
@@ -94,6 +123,12 @@ dest = "Slack" if SLACK_WEBHOOK else ("Zapier" if ZAPIER_WEBHOOK else ("Discord"
 st.sidebar.caption(f"Destination: {dest}")
 auto_post = st.sidebar.checkbox("Auto-post spikes", value=False, key="auto_post")
 st.sidebar.caption("Tip: add SLACK_WEBHOOK or ZAPIER_WEBHOOK to Secrets to enable posting.")
+
+with st.sidebar.expander("Debug"):
+    st.write("use_live:", use_live)
+    st.write("has_scan:", has_scan, "has_covalent:", has_covalent)
+    st.write("chains:", CHAINS)
+    st.write("#addresses:", len(ADDRESSES))
 
 # ---------- Helpers ----------
 def load_csv(path: str) -> pd.DataFrame:
@@ -110,7 +145,7 @@ def load_csv(path: str) -> pd.DataFrame:
         st.warning(f"Missing or unreadable file: {path} ({e})")
         return pd.DataFrame()
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_eth_usd() -> float:
     try:
         r = requests.get(
@@ -122,6 +157,26 @@ def get_eth_usd() -> float:
         return float(r.json()["ethereum"]["usd"])
     except Exception:
         return 0.0
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_token_prices(chain: str, contracts: list[str]) -> dict:
+    """
+    Returns {contract_address_lower: usd_price}
+    """
+    platform = COINGECKO_PLATFORMS.get(chain)
+    if not platform or not contracts:
+        return {}
+    try:
+        url = f"https://api.coingecko.com/api/v3/simple/token_price/{platform}"
+        r = requests.get(url, params={"contract_addresses": ",".join(contracts), "vs_currencies": "usd"}, timeout=15)
+        r.raise_for_status()
+        data = r.json() or {}
+        out = {}
+        for caddr, vals in data.items():
+            out[caddr.lower()] = float(vals.get("usd", 0) or 0)
+        return out
+    except Exception:
+        return {}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_covalent_tx(chain: str, address: str, page_size: int = 200):
@@ -214,11 +269,12 @@ def build_flows_covalent(chain: str, addrs, hours_back: int) -> pd.DataFrame:
     cutoff = pd.Timestamp.now(tz="UTC") - timedelta(hours=hours_back)
     df = df[df["ts"] >= cutoff].copy()
 
-    df_in = df[df["to_addr"].isin(addrs)].copy()
+    addrs_set = set(a.lower() for a in addrs)
+    df_in = df[df["to_addr"].isin(addrs_set)].copy()
     df_in["dir"] = "in"
     df_in["entity"] = df_in["from_addr"]
 
-    df_out = df[df["from_addr"].isin(addrs)].copy()
+    df_out = df[df["from_addr"].isin(addrs_set)].copy()
     df_out["dir"] = "out"
     df_out["entity"] = df_out["to_addr"]
 
@@ -228,6 +284,10 @@ def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
     eth_usd = get_eth_usd()
     if eth_usd <= 0:
         eth_usd = 3000.0  # fallback
+
+    # Include project token pricing (AERO on Base)
+    wl_contracts = list(WHITELIST_TOKENS.get(chain, {}).keys())
+    wl_prices = get_token_prices(chain, wl_contracts) if wl_contracts else {}
 
     rows = []
     addrs_set = set(a.lower() for a in addrs)
@@ -250,7 +310,8 @@ def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
             value_eth = value_wei / 1e18
             amount_usd = value_eth * eth_usd
             rows.append({"ts": ts, "tx_hash": tx_hash, "from_addr": from_addr, "to_addr": to_addr, "amount_usd": amount_usd, "chain": chain})
-        # Token transfers (stablecoins, WETH)
+
+        # Token transfers: include stables, WETH/ETH, and whitelisted tokens (e.g., AERO)
         toks = fetch_scan_tokentx(chain, addr, offset=200)
         for t in toks:
             try:
@@ -259,6 +320,7 @@ def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
                 continue
             if ts < cutoff:
                 continue
+
             token_symbol = str(t.get("tokenSymbol", "")).upper()
             decimals = int(t.get("tokenDecimal", "18") or "18")
             raw = t.get("value", "0")
@@ -266,17 +328,24 @@ def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
                 value = int(raw) / (10 ** decimals)
             except Exception:
                 value = 0.0
+
+            contract = str(t.get("contractAddress", "")).lower()
+
             if token_symbol in STABLE_TOKENS:
                 amount_usd = value
             elif token_symbol in {"WETH", "ETH"}:
                 amount_usd = value * eth_usd
+            elif contract in wl_prices and wl_prices[contract] > 0:
+                amount_usd = value * wl_prices[contract]
             else:
-                # Skip obscure tokens to avoid noisy USD estimates
+                # Skip other tokens to avoid noisy USD estimates
                 continue
+
             tx_hash = t.get("hash", "")
             from_addr = (t.get("from", "") or "").lower()
             to_addr = (t.get("to", "") or "").lower()
-            rows.append({"ts": ts, "tx_hash": tx_hash, "from_addr": from_addr, "to_addr": to_addr, "amount_usd": amount_usd, "chain": chain})
+            rows.append({"ts": ts, "tx_hash": tx_hash, "from_addr": from_addr, "to_addr": to_addr,
+                         "amount_usd": amount_usd, "chain": chain})
 
     if not rows:
         return pd.DataFrame()
@@ -303,6 +372,8 @@ def detect_spikes(flows: pd.DataFrame, window_minutes: int, abs_threshold: float
         return pd.DataFrame()
     cutoff = pd.Timestamp.now(tz="UTC") - timedelta(minutes=window_minutes)
     f = flows[flows["ts"] >= cutoff].copy()
+    if f.empty:
+        return pd.DataFrame()
     g = f.groupby(["chain","entity","dir"], dropna=False)["amount_usd"].sum().reset_index()
     g = g[g["amount_usd"] >= abs_threshold].copy()
     if g.empty:
@@ -316,7 +387,6 @@ def detect_spikes(flows: pd.DataFrame, window_minutes: int, abs_threshold: float
         direction = row["dir"]
         sub = f[(f["chain"] == chain) & (f["entity"] == entity) & (f["dir"] == direction)]
         if not sub.empty:
-            # pick the tx with largest USD value
             idx = sub["amount_usd"].astype(float).idxmax()
             txh = str(sub.loc[idx, "tx_hash"]) if "tx_hash" in sub.columns else ""
             base = SCAN_TX_BASE.get(chain, "")
@@ -337,7 +407,7 @@ def search_urlscan(terms, limit: int = 25) -> pd.DataFrame:
         return pd.DataFrame()
     results = []
     headers = {"API-Key": URLSCAN_KEY} if URLSCAN_KEY else {}
-    for term in terms[:3]:
+    for term in terms[:5]:
         try:
             q = f"https://urlscan.io/api/v1/search/?q={term}"
             r = requests.get(q, headers=headers, timeout=20)
@@ -477,6 +547,7 @@ def send_alerts_df(alerts_df: pd.DataFrame) -> int:
     return posted
 
 # ---------- Data sourcing ----------
+flows_recent = pd.DataFrame()
 if use_live and ADDRESSES and (has_covalent or has_scan):
     flows_all = []
     for ch in CHAINS:
@@ -489,7 +560,6 @@ if use_live and ADDRESSES and (has_covalent or has_scan):
             flows = pd.DataFrame()
         if not flows.empty:
             flows_all.append(flows)
-
     flows_recent = pd.concat(flows_all, ignore_index=True) if flows_all else pd.DataFrame()
 
     # Spike detection computed from recent flows
@@ -497,7 +567,7 @@ if use_live and ADDRESSES and (has_covalent or has_scan):
     fs_24 = detect_spikes(flows_recent, window_minutes=24*60, abs_threshold=abs_24h_usd)
     flow_spikes = pd.concat([fs_30, fs_24], ignore_index=True) if (fs_30 is not None or fs_24 is not None) else pd.DataFrame()
 
-    brand_terms = [CLIENT_NAME.split()[0]] if CLIENT_NAME else []
+    brand_terms = BRAND_TERMS
     domains = search_urlscan(brand_terms)
 
     clusters = pd.DataFrame(columns=["cluster_id","chain","size","shared_funder","confidence","first_seen","last_seen","features"])
@@ -520,24 +590,23 @@ else:
     clusters = load_csv("data/clusters.csv")
     domains = load_csv("data/domains.csv")
     alerts = load_csv("data/alerts.csv")
-    flows_recent = pd.DataFrame()
+
 # ---------- Filters ----------
 st.sidebar.title("Filters")
-default_chains = ["base", "arbitrum", "solana"]
+default_chains = ["base", "arbitrum"]
 available_chains = sorted(list({
-    *flow_spikes.get("chain", pd.Series()).dropna().unique(),
-    *clusters.get("chain", pd.Series()).dropna().unique()
+    *flow_spikes.get("chain", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(flow_spikes, pd.DataFrame) and "chain" in flow_spikes.columns else [],
+    *clusters.get("chain", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(clusters, pd.DataFrame) and "chain" in clusters.columns else [],
+    *flows_recent.get("chain", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(flows_recent, pd.DataFrame) and "chain" in flows_recent.columns else [],
 })) or default_chains
 chains = st.sidebar.multiselect("Chains", available_chains, default=available_chains)
 
 # Filtered views
-fs = flow_spikes[flow_spikes["chain"].isin(chains)] if not flow_spikes.empty and "chain" in flow_spikes.columns else flow_spikes
-cl = clusters[clusters["chain"].isin(chains)] if not clusters.empty and "chain" in clusters.columns else clusters
-dm = domains.copy()
-al = alerts.copy()
-
-# Filter flows_recent too
-fr = flows_recent[flows_recent["chain"].isin(chains)] if 'flows_recent' in locals() and not flows_recent.empty and "chain" in flows_recent.columns else pd.DataFrame()
+fs = flow_spikes[flow_spikes["chain"].isin(chains)] if isinstance(flow_spikes, pd.DataFrame) and not flow_spikes.empty and "chain" in flow_spikes.columns else pd.DataFrame()
+cl = clusters[clusters["chain"].isin(chains)] if isinstance(clusters, pd.DataFrame) and not clusters.empty and "chain" in clusters.columns else pd.DataFrame()
+dm = domains.copy() if isinstance(domains, pd.DataFrame) else pd.DataFrame()
+al = alerts.copy() if isinstance(alerts, pd.DataFrame) else pd.DataFrame()
+fr = flows_recent[flows_recent["chain"].isin(chains)] if isinstance(flows_recent, pd.DataFrame) and not flows_recent.empty and "chain" in flows_recent.columns else pd.DataFrame()
 
 # ---------- KPIs ----------
 def num(x):
@@ -546,8 +615,8 @@ def num(x):
     except Exception:
         return 0.0
 
-gross_in = fs.loc[fs.get("dir", pd.Series()).str.lower() == "in", "amount_usd"].apply(num).sum() if "dir" in fs.columns else 0.0
-gross_out = fs.loc[fs.get("dir", pd.Series()).str.lower() == "out", "amount_usd"].apply(num).sum() if "dir" in fs.columns else 0.0
+gross_in = fr.loc[fr.get("dir", pd.Series(dtype=str)).str.lower() == "in", "amount_usd"].apply(num).sum() if "dir" in fr.columns else 0.0
+gross_out = fr.loc[fr.get("dir", pd.Series(dtype=str)).str.lower() == "out", "amount_usd"].apply(num).sum() if "dir" in fr.columns else 0.0
 net_in = gross_in - gross_out
 active_clusters = len(cl) if not cl.empty else 0
 domains_flagged = int(pd.Series(dm["risk_flag"]).astype(bool).sum()) if ("risk_flag" in dm.columns and not dm.empty) else 0
@@ -585,14 +654,13 @@ with tab_flows:
     else:
         st.info("No flow spikes yet.")
 
-        st.subheader("Recent raw flows")
+    st.subheader("Recent raw flows")
     if not fr.empty:
         show_cols_rf = [c for c in ["ts","chain","dir","entity","amount_usd","tx_hash"] if c in fr.columns]
         st.dataframe(fr.sort_values("ts", ascending=False)[show_cols_rf].head(200), use_container_width=True)
     else:
         st.caption("No raw flows in this window.")
 
-    
     st.subheader("Wallet clusters")
     if not cl.empty:
         show_cols_c = [c for c in ["cluster_id","chain","size","shared_funder","confidence","first_seen","last_seen","features"] if c in cl.columns]
@@ -606,7 +674,7 @@ with tab_domains:
         show_cols_d = [c for c in ["domain","matched_term","first_seen","risk_flag","linked_from_social","registrar","ssl_issuer","urlscan_url"] if c in dm.columns]
         st.dataframe(dm.sort_values("first_seen", ascending=False)[show_cols_d], use_container_width=True)
     else:
-        st.info("No domain matches yet. Set client NAME to help the search.")
+        st.info("No domain matches yet. Set client NAME or BRAND_TERMS_JSON in Secrets to help the search.")
 
 with tab_alerts:
     st.subheader("Recent alerts")
@@ -638,12 +706,12 @@ with tab_alerts:
             st.warning("No destination configured. Add SLACK_WEBHOOK or ZAPIER_WEBHOOK to Secrets.")
 
 # Footer
-st.markdown("---")
+st.markdown("—")
 cta = st.columns([3,1])[1]
 with cta:
     st.subheader("Book a 2‑week pilot (£700)")
     st.write(f"Email: {CONTACT_EMAIL}")
     st.write("Includes live dashboard, alerts under 10 minutes, and a weekly 1‑page brief. If you don’t see value, don’t roll.")
 
-if st.session_state.get("show_disclaimer", True):
+if show_disclaimer:
     st.caption("Public data only. No investment advice. Sources and timestamps logged.")
