@@ -138,7 +138,7 @@ cta = st.columns([3,1])[1]
 with cta:
     st.subheader("Book a 2‑week pilot (£700)")
     if contact_email:
-        st.write(f"Email: {contact_email}")
+        st.write(f"Email: {crypto@addprivacy.net}")
     st.write("Includes dashboard, alerts under 10 minutes, and a weekly 1‑page brief. If you don’t see value, don’t roll.")
 
 if st.session_state.get("show_disclaimer", True):
