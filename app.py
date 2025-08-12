@@ -39,7 +39,7 @@ st.sidebar.title("Get started")
 st.sidebar.markdown("**Book a 2‑week pilot (£700)**")
 contact_email = st.secrets.get("contact", {}).get("EMAIL", "")
 if contact_email:
-    st.sidebar.write(f"[Email us](mailto:{crypto@addprivacy.net}?subject=Vantum%20Pilot)")
+    st.sidebar.write(f"[Email us](mailto:{contact_email}?subject=Vantum%20Pilot)")
 else:
     st.sidebar.info("Set contact.EMAIL in Streamlit secrets to show a mailto link here.")
 st.sidebar.checkbox("Show disclaimer", value=True, key="show_disclaimer")
@@ -138,7 +138,7 @@ cta = st.columns([3,1])[1]
 with cta:
     st.subheader("Book a 2‑week pilot (£700)")
     if contact_email:
-        st.write(f"Email: {crypto@addprivacy.net}")
+        st.write(f"Email: {contact_email}")
     st.write("Includes dashboard, alerts under 10 minutes, and a weekly 1‑page brief. If you don’t see value, don’t roll.")
 
 if st.session_state.get("show_disclaimer", True):
