@@ -36,6 +36,7 @@ ARBISCAN_KEY = SECRETS.get("apis", {}).get("ARBISCAN_KEY", "")
 
 SLACK_WEBHOOK = SECRETS.get("alerts", {}).get("SLACK_WEBHOOK", "")
 DISCORD_WEBHOOK = SECRETS.get("alerts", {}).get("DISCORD_WEBHOOK", "")
+ZAPIER_WEBHOOK = SECRETS.get("alerts", {}).get("ZAPIER_WEBHOOK", "")
 
 # Basic chain IDs for Covalent
 CHAIN_IDS = {
@@ -50,6 +51,15 @@ CHAIN_IDS = {
 CHAIN_SCANS = {
     "base": {"url": "https://api.basescan.org/api", "key": BASESCAN_KEY},
     "arbitrum": {"url": "https://api.arbiscan.io/api", "key": ARBISCAN_KEY},
+}
+
+# Public explorer TX URL bases for evidence links
+SCAN_TX_BASE = {
+    "base": "https://basescan.org/tx/",
+    "arbitrum": "https://arbiscan.io/tx/",
+    "ethereum": "https://etherscan.io/tx/",
+    "polygon": "https://polygonscan.com/tx/",
+    "optimism": "https://optimistic.etherscan.io/tx/",
 }
 
 STABLE_TOKENS = {"USDC", "USDBC", "USDC.E", "USDT", "DAI", "USD+"}
@@ -77,6 +87,13 @@ if use_live:
         st.sidebar.success("Data source: Block explorers (BaseScan/Arbiscan)")
     else:
         st.sidebar.warning("No API keys found. Add Covalent or BaseScan/Arbiscan keys in Secrets.")
+
+# Alerts setup
+st.sidebar.title("Alerts")
+dest = "Slack" if SLACK_WEBHOOK else ("Zapier" if ZAPIER_WEBHOOK else ("Discord" if DISCORD_WEBHOOK else "None"))
+st.sidebar.caption(f"Destination: {dest}")
+auto_post = st.sidebar.checkbox("Auto-post spikes", value=False, key="auto_post")
+st.sidebar.caption("Tip: add SLACK_WEBHOOK or ZAPIER_WEBHOOK to Secrets to enable posting.")
 
 # ---------- Helpers ----------
 def load_csv(path: str) -> pd.DataFrame:
@@ -279,6 +296,9 @@ def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
     return pd.concat([df_in, df_out], ignore_index=True)
 
 def detect_spikes(flows: pd.DataFrame, window_minutes: int, abs_threshold: float) -> pd.DataFrame:
+    """
+    Detect spikes and attach an evidence_url to a representative transaction per (chain, entity, dir) group.
+    """
     if flows.empty:
         return pd.DataFrame()
     cutoff = pd.Timestamp.now(tz="UTC") - timedelta(minutes=window_minutes)
@@ -287,11 +307,28 @@ def detect_spikes(flows: pd.DataFrame, window_minutes: int, abs_threshold: float
     g = g[g["amount_usd"] >= abs_threshold].copy()
     if g.empty:
         return pd.DataFrame()
+
+    # Pick a representative tx per group (max amount_usd)
+    evidence_urls = []
+    for _, row in g.iterrows():
+        chain = row["chain"]
+        entity = row["entity"]
+        direction = row["dir"]
+        sub = f[(f["chain"] == chain) & (f["entity"] == entity) & (f["dir"] == direction)]
+        if not sub.empty:
+            # pick the tx with largest USD value
+            idx = sub["amount_usd"].astype(float).idxmax()
+            txh = str(sub.loc[idx, "tx_hash"]) if "tx_hash" in sub.columns else ""
+            base = SCAN_TX_BASE.get(chain, "")
+            evidence_urls.append(f"{base}{txh}" if base and txh else "")
+        else:
+            evidence_urls.append("")
+    g["evidence_url"] = evidence_urls
+
     g["window"] = f"{window_minutes}m" if window_minutes < 120 else "24h"
     g["ts"] = pd.Timestamp.now(tz="UTC")
     g["p95_baseline"] = None
     g["zscore"] = None
-    g["evidence_url"] = ""
     return g[["ts","chain","entity","dir","window","amount_usd","p95_baseline","zscore","evidence_url"]]
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -338,19 +375,106 @@ def build_alerts_from_spikes(spikes_30m: pd.DataFrame, spikes_24h: pd.DataFrame)
         if df is None or df.empty:
             continue
         for _, r in df.iterrows():
-            severity = "critical" if r["amount_usd"] >= (abs_24h_usd if window=="24h" else abs_30m_usd) else "warning"
-            confidence = 0.8 if severity == "critical" else 0.7
-            subject = ("Inflow spike" if r["dir"] == "in" else "Outflow spike") + f" — {r['entity'][:10]}… on {r['chain']}"
+            severity = "Critical" if r["amount_usd"] >= (abs_24h_usd if window=="24h" else abs_30m_usd) else "Warning"
+            confidence = 0.8 if severity == "Critical" else 0.7
+            subject = ("Inflow spike" if r["dir"] == "in" else "Outflow spike") + f" — {str(r['entity'])[:10]}… on {r['chain']}"
             rows.append({
                 "ts": now,
-                "severity": severity.title(),
+                "severity": severity,
                 "rule": "inflow_spike" if r["dir"]=="in" else "outflow_spike",
                 "subject": subject,
                 "confidence": confidence,
-                "evidence_url": "",
-                "meta": json.dumps({"entity": r["entity"], "amount_usd": float(r["amount_usd"]), "window": window})
+                "evidence_url": r.get("evidence_url", ""),
+                "meta": json.dumps({"entity": r["entity"], "amount_usd": float(r["amount_usd"]), "window": window, "chain": r["chain"], "dir": r["dir"]})
             })
     return pd.DataFrame(rows)
+
+# ---------- Posting helpers ----------
+def _safe_post_json(url: str, payload: dict):
+    try:
+        r = requests.post(url, json=payload, timeout=15)
+        return r.status_code, (r.text or "")[:200]
+    except Exception as e:
+        return None, str(e)
+
+def post_slack(text: str):
+    if not SLACK_WEBHOOK:
+        return False, "No Slack webhook in Secrets"
+    code, msg = _safe_post_json(SLACK_WEBHOOK, {"text": text})
+    return bool(code and 200 <= code < 300), msg
+
+def post_discord(text: str):
+    if not DISCORD_WEBHOOK:
+        return False, "No Discord webhook in Secrets"
+    code, msg = _safe_post_json(DISCORD_WEBHOOK, {"content": text})
+    return bool(code and 200 <= code < 300), msg
+
+def post_zapier(payload: dict):
+    if not ZAPIER_WEBHOOK:
+        return False, "No Zapier webhook in Secrets"
+    code, msg = _safe_post_json(ZAPIER_WEBHOOK, payload)
+    return bool(code and 200 <= code < 300), msg
+
+def format_alert_text(row: dict) -> str:
+    sev = row.get("severity", "Warning")
+    rule = row.get("rule", "")
+    subject = row.get("subject", "")
+    meta = row.get("meta", "{}")
+    try:
+        meta_obj = json.loads(meta) if isinstance(meta, str) else (meta or {})
+    except Exception:
+        meta_obj = {}
+    chain = meta_obj.get("chain", "")
+    direction = meta_obj.get("dir", "")
+    window = meta_obj.get("window", "")
+    amount = meta_obj.get("amount_usd", 0)
+    entity = meta_obj.get("entity", "")
+    eurl = row.get("evidence_url", "")
+
+    prefix = ":rotating_light:" if sev.lower() == "critical" else ":warning:"
+    line1 = f"{prefix} {sev} {rule.replace('_',' ')} on {chain} ({window}) — ${amount:,.0f}"
+    line2 = f"Subject: {subject}"
+    line3 = f"Direction: {direction or '?'} | Entity: {entity or '?'}"
+    line4 = f"Evidence: {eurl}" if eurl else ""
+    return "\n".join([x for x in [line1, line2, line3, line4] if x])
+
+def send_alerts_df(alerts_df: pd.DataFrame) -> int:
+    if alerts_df is None or alerts_df.empty:
+        return 0
+    posted = 0
+    for _, r in alerts_df.iterrows():
+        row = r.to_dict()
+        text = format_alert_text(row)
+        # Unified payload for Zapier mapping
+        try:
+            meta_obj = json.loads(row.get("meta", "{}"))
+        except Exception:
+            meta_obj = {}
+        zap_payload = {
+            "channel": "#vantum-alerts",
+            "severity": row.get("severity"),
+            "rule": row.get("rule"),
+            "subject": row.get("subject"),
+            "chain": meta_obj.get("chain"),
+            "direction": meta_obj.get("dir"),
+            "window": meta_obj.get("window"),
+            "amount_usd": float(meta_obj.get("amount_usd", 0) or 0),
+            "entity": meta_obj.get("entity"),
+            "evidence_url": row.get("evidence_url"),
+            "ts": str(row.get("ts", pd.Timestamp.now(tz="UTC")))
+        }
+        ok = False
+        if SLACK_WEBHOOK:
+            ok, _ = post_slack(text)
+        elif ZAPIER_WEBHOOK:
+            ok, _ = post_zapier(zap_payload)
+        elif DISCORD_WEBHOOK:
+            ok, _ = post_discord(text)
+        else:
+            st.warning("No Slack, Zapier, or Discord webhook configured. Add one in Secrets.")
+            break
+        posted += 1 if ok else 0
+    return posted
 
 # ---------- Data sourcing ----------
 if use_live and ADDRESSES and (has_covalent or has_scan):
@@ -373,6 +497,18 @@ if use_live and ADDRESSES and (has_covalent or has_scan):
 
     clusters = pd.DataFrame(columns=["cluster_id","chain","size","shared_funder","confidence","first_seen","last_seen","features"])
     alerts = build_alerts_from_spikes(fs_30, fs_24)
+
+    # Auto-post if enabled (simple throttle to avoid spam)
+    if auto_post and not alerts.empty:
+        last = st.session_state.get("last_alert_post_ts")
+        now_ts = pd.Timestamp.now(tz="UTC")
+        if not last or (now_ts - last).total_seconds() > 120:
+            n = send_alerts_df(alerts)
+            if n > 0:
+                st.sidebar.success(f"Posted {n} alert(s) to {dest}.")
+                st.session_state["last_alert_post_ts"] = now_ts
+        else:
+            st.sidebar.caption("Auto-post cooling down (≤120s).")
 else:
     flow_spikes = load_csv("data/flow_spikes.csv")
     clusters = load_csv("data/clusters.csv")
@@ -462,6 +598,27 @@ with tab_alerts:
         st.dataframe(al.sort_values("ts", ascending=False)[show_cols_a], use_container_width=True)
     else:
         st.info("No alerts in this window.")
+
+    # Send a manual test alert
+    if st.button("Send test alert to Slack/Zapier"):
+        test = pd.DataFrame([{
+            "ts": pd.Timestamp.now(tz="UTC"),
+            "severity": "Test",
+            "rule": "test_alert",
+            "subject": "Test alert from Vantum",
+            "confidence": 0.99,
+            "evidence_url": "",
+            "meta": json.dumps({"entity": "0x0000000000000000000000000000000000000000",
+                                "amount_usd": 12345,
+                                "window": "test",
+                                "chain": "base",
+                                "dir": "in"})
+        }])
+        n = send_alerts_df(test)
+        if n > 0:
+            st.success(f"Sent {n} test alert(s) to {dest}.")
+        else:
+            st.warning("No destination configured. Add SLACK_WEBHOOK or ZAPIER_WEBHOOK to Secrets.")
 
 # Footer
 st.markdown("---")
