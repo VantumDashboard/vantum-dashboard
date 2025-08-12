@@ -12,7 +12,7 @@ if Path("vantum-wordmark.svg").exists():
     st.image("vantum-wordmark.svg", width=260)
 
 st.title("Crypto Threats & Growth Intelligence")
-st.caption("Pulls real on‑chain data to configured to your project.")
+st.caption("Live MVP: pulls real on‑chain data when configured to your project.")
 
 # ---------- Secrets / Config ----------
 SECRETS = st.secrets
@@ -594,11 +594,14 @@ else:
 # ---------- Filters ----------
 st.sidebar.title("Filters")
 default_chains = ["base", "arbitrum"]
-available_chains = sorted(list({
-    *flow_spikes.get("chain", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(flow_spikes, pd.DataFrame) and "chain" in flow_spikes.columns else [],
-    *clusters.get("chain", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(clusters, pd.DataFrame) and "chain" in clusters.columns else [],
-    *flows_recent.get("chain", pd.Series(dtype=str)).dropna().unique().tolist() if isinstance(flows_recent, pd.DataFrame) and "chain" in flows_recent.columns else [],
-})) or default_chains
+chains_set = set()
+if isinstance(flow_spikes, pd.DataFrame) and "chain" in flow_spikes.columns:
+    chains_set.update(flow_spikes["chain"].dropna().astype(str).str.lower().unique().tolist())
+if isinstance(clusters, pd.DataFrame) and "chain" in clusters.columns:
+    chains_set.update(clusters["chain"].dropna().astype(str).str.lower().unique().tolist())
+if isinstance(flows_recent, pd.DataFrame) and "chain" in flows_recent.columns:
+    chains_set.update(flows_recent["chain"].dropna().astype(str).str.lower().unique().tolist())
+available_chains = sorted(chains_set) or default_chains
 chains = st.sidebar.multiselect("Chains", available_chains, default=available_chains)
 
 # Filtered views
