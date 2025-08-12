@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 
 st.set_page_config(page_title="Vantum — Crypto Threats & Growth Intelligence (MVP)", layout="wide")
@@ -52,7 +52,7 @@ CHAIN_SCANS = {
     "arbitrum": {"url": "https://api.arbiscan.io/api", "key": ARBISCAN_KEY},
 }
 
-STABLE_TOKENS = {"USDC", "USDbC", "USDC.E", "USDT", "DAI", "USD+"}
+STABLE_TOKENS = {"USDC", "USDBC", "USDC.E", "USDT", "DAI", "USD+"}
 
 # ---------- Sidebar ----------
 st.sidebar.title("Get started")
@@ -184,7 +184,7 @@ def normalize_tx(rows):
     df["to_addr"] = df["to_addr"].astype(str).str.lower()
     return df.dropna(subset=["ts"])
 
-def build_flows_covalent(chain: str, addrs: list[str], hours_back: int) -> pd.DataFrame:
+def build_flows_covalent(chain: str, addrs, hours_back: int) -> pd.DataFrame:
     all_rows = []
     for addr in addrs:
         rows = fetch_covalent_tx(chain, addr, page_size=200)
@@ -194,7 +194,7 @@ def build_flows_covalent(chain: str, addrs: list[str], hours_back: int) -> pd.Da
     df = normalize_tx(all_rows)
     if df.empty:
         return df
-    cutoff = pd.Timestamp.utcnow().tz_localize("UTC") - timedelta(hours=hours_back)
+    cutoff = pd.Timestamp.now(tz="UTC") - timedelta(hours=hours_back)
     df = df[df["ts"] >= cutoff].copy()
 
     df_in = df[df["to_addr"].isin(addrs)].copy()
@@ -207,14 +207,14 @@ def build_flows_covalent(chain: str, addrs: list[str], hours_back: int) -> pd.Da
 
     return pd.concat([df_in, df_out], ignore_index=True)
 
-def build_flows_scan(chain: str, addrs: list[str], hours_back: int) -> pd.DataFrame:
+def build_flows_scan(chain: str, addrs, hours_back: int) -> pd.DataFrame:
     eth_usd = get_eth_usd()
     if eth_usd <= 0:
-        eth_usd = 3000.0  # sane fallback
+        eth_usd = 3000.0  # fallback
 
     rows = []
     addrs_set = set(a.lower() for a in addrs)
-    cutoff = pd.Timestamp.utcnow().tz_localize("UTC") - timedelta(hours=hours_back)
+    cutoff = pd.Timestamp.now(tz="UTC") - timedelta(hours=hours_back)
 
     for addr in addrs:
         # Native transfers
@@ -281,21 +281,21 @@ def build_flows_scan(chain: str, addrs: list[str], hours_back: int) -> pd.DataFr
 def detect_spikes(flows: pd.DataFrame, window_minutes: int, abs_threshold: float) -> pd.DataFrame:
     if flows.empty:
         return pd.DataFrame()
-    cutoff = pd.Timestamp.utcnow().tz_localize("UTC") - timedelta(minutes=window_minutes)
+    cutoff = pd.Timestamp.now(tz="UTC") - timedelta(minutes=window_minutes)
     f = flows[flows["ts"] >= cutoff].copy()
     g = f.groupby(["chain","entity","dir"], dropna=False)["amount_usd"].sum().reset_index()
     g = g[g["amount_usd"] >= abs_threshold].copy()
     if g.empty:
         return pd.DataFrame()
     g["window"] = f"{window_minutes}m" if window_minutes < 120 else "24h"
-    g["ts"] = pd.Timestamp.utcnow().tz_localize("UTC")
+    g["ts"] = pd.Timestamp.now(tz="UTC")
     g["p95_baseline"] = None
     g["zscore"] = None
     g["evidence_url"] = ""
     return g[["ts","chain","entity","dir","window","amount_usd","p95_baseline","zscore","evidence_url"]]
 
 @st.cache_data(ttl=300, show_spinner=False)
-def search_urlscan(terms: list[str], limit: int = 25) -> pd.DataFrame:
+def search_urlscan(terms, limit: int = 25) -> pd.DataFrame:
     if not terms:
         return pd.DataFrame()
     results = []
@@ -333,7 +333,7 @@ def search_urlscan(terms: list[str], limit: int = 25) -> pd.DataFrame:
 
 def build_alerts_from_spikes(spikes_30m: pd.DataFrame, spikes_24h: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    now = pd.Timestamp.utcnow().tz_localize("UTC")
+    now = pd.Timestamp.now(tz="UTC")
     for df, window in [(spikes_30m, "30m"), (spikes_24h, "24h")]:
         if df is None or df.empty:
             continue
