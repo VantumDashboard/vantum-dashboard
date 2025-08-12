@@ -39,7 +39,7 @@ st.sidebar.title("Get started")
 st.sidebar.markdown("**Book a 2‑week pilot (£700)**")
 contact_email = st.secrets.get("contact", {}).get("EMAIL", "")
 if contact_email:
-    st.sidebar.write(f"[Email us](mailto:{contact_email}?subject=Vantum%20Pilot)")
+    st.sidebar.write(f"[Email us](mailto:{crypto@addprivacy.net}?subject=Vantum%20Pilot)")
 else:
     st.sidebar.info("Set contact.EMAIL in Streamlit secrets to show a mailto link here.")
 st.sidebar.checkbox("Show disclaimer", value=True, key="show_disclaimer")
