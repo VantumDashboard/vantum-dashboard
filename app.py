@@ -5,14 +5,14 @@ import requests
 from datetime import timedelta
 from pathlib import Path
 
-st.set_page_config(page_title="Vantum — Crypto Threats & Growth Intelligence (MVP)", layout="wide")
+st.set_page_config(page_title="Crypto Threats & Growth Intelligence (MVP)", layout="wide")
 
 # ---------- Branding ----------
 if Path("vantum-wordmark.svg").exists():
     st.image("vantum-wordmark.svg", width=260)
 
-st.title("Vantum — Crypto Threats & Growth Intelligence")
-st.caption("Live MVP: pulls real on‑chain data when configured; falls back to demo CSVs if not.")
+st.title("Crypto Threats & Growth Intelligence")
+st.caption("Live MVP: pulls real on‑chain data")
 
 # ---------- Secrets / Config ----------
 SECRETS = st.secrets
@@ -480,16 +480,21 @@ def send_alerts_df(alerts_df: pd.DataFrame) -> int:
 if use_live and ADDRESSES and (has_covalent or has_scan):
     flows_all = []
     for ch in CHAINS:
-        if has_covalent:
+        # Prefer block explorers (better token transfer coverage); fall back to Covalent
+        if has_scan:
+            flows = build_flows_scan(ch, ADDRESSES, lookback_hours)
+        elif has_covalent:
             flows = build_flows_covalent(ch, ADDRESSES, lookback_hours)
         else:
-            flows = build_flows_scan(ch, ADDRESSES, lookback_hours)
+            flows = pd.DataFrame()
         if not flows.empty:
             flows_all.append(flows)
-    df_flows = pd.concat(flows_all, ignore_index=True) if flows_all else pd.DataFrame()
 
-    fs_30 = detect_spikes(df_flows, window_minutes=30, abs_threshold=abs_30m_usd)
-    fs_24 = detect_spikes(df_flows, window_minutes=24*60, abs_threshold=abs_24h_usd)
+    flows_recent = pd.concat(flows_all, ignore_index=True) if flows_all else pd.DataFrame()
+
+    # Spike detection computed from recent flows
+    fs_30 = detect_spikes(flows_recent, window_minutes=30, abs_threshold=abs_30m_usd)
+    fs_24 = detect_spikes(flows_recent, window_minutes=24*60, abs_threshold=abs_24h_usd)
     flow_spikes = pd.concat([fs_30, fs_24], ignore_index=True) if (fs_30 is not None or fs_24 is not None) else pd.DataFrame()
 
     brand_terms = [CLIENT_NAME.split()[0]] if CLIENT_NAME else []
@@ -510,11 +515,12 @@ if use_live and ADDRESSES and (has_covalent or has_scan):
         else:
             st.sidebar.caption("Auto-post cooling down (≤120s).")
 else:
+    # Demo fallback (if you don't have demo CSVs locally, these will be empty)
     flow_spikes = load_csv("data/flow_spikes.csv")
     clusters = load_csv("data/clusters.csv")
     domains = load_csv("data/domains.csv")
     alerts = load_csv("data/alerts.csv")
-
+    flows_recent = pd.DataFrame()
 # ---------- Filters ----------
 st.sidebar.title("Filters")
 default_chains = ["base", "arbitrum", "solana"]
@@ -529,6 +535,9 @@ fs = flow_spikes[flow_spikes["chain"].isin(chains)] if not flow_spikes.empty and
 cl = clusters[clusters["chain"].isin(chains)] if not clusters.empty and "chain" in clusters.columns else clusters
 dm = domains.copy()
 al = alerts.copy()
+
+# Filter flows_recent too
+fr = flows_recent[flows_recent["chain"].isin(chains)] if 'flows_recent' in locals() and not flows_recent.empty and "chain" in flows_recent.columns else pd.DataFrame()
 
 # ---------- KPIs ----------
 def num(x):
@@ -555,10 +564,10 @@ tab_overview, tab_flows, tab_domains, tab_alerts = st.tabs(
 )
 
 with tab_overview:
-    st.subheader("Top counterparties by net flow")
-    if not fs.empty and "entity" in fs.columns:
-        df = fs.copy()
-        df["amount_usd"] = df["amount_usd"].apply(num)
+    st.subheader("Top counterparties by net flow (lookback window)")
+    if not fr.empty and "entity" in fr.columns:
+        df = fr.copy()
+        df["amount_usd"] = pd.to_numeric(df["amount_usd"], errors="coerce").fillna(0.0)
         df["in_usd"] = df.apply(lambda r: r["amount_usd"] if str(r.get("dir","")).lower()=="in" else 0.0, axis=1)
         df["out_usd"] = df.apply(lambda r: r["amount_usd"] if str(r.get("dir","")).lower()=="out" else 0.0, axis=1)
         top = df.groupby("entity", dropna=False).agg(in_usd=("in_usd","sum"),
@@ -566,7 +575,7 @@ with tab_overview:
         top["net_usd"] = top["in_usd"] - top["out_usd"]
         st.dataframe(top.sort_values("net_usd", ascending=False).round(0).head(10), use_container_width=True)
     else:
-        st.info("No flow data yet. Add client ADDRESSES and an API key in Secrets, then enable live mode.")
+        st.info("No live flow data found for the selected chains and lookback. Try increasing Lookback to 24–48h and confirm explorer/Covalent keys in Secrets.")
 
 with tab_flows:
     st.subheader("Recent flow spikes")
@@ -576,6 +585,14 @@ with tab_flows:
     else:
         st.info("No flow spikes yet.")
 
+        st.subheader("Recent raw flows")
+    if not fr.empty:
+        show_cols_rf = [c for c in ["ts","chain","dir","entity","amount_usd","tx_hash"] if c in fr.columns]
+        st.dataframe(fr.sort_values("ts", ascending=False)[show_cols_rf].head(200), use_container_width=True)
+    else:
+        st.caption("No raw flows in this window.")
+
+    
     st.subheader("Wallet clusters")
     if not cl.empty:
         show_cols_c = [c for c in ["cluster_id","chain","size","shared_funder","confidence","first_seen","last_seen","features"] if c in cl.columns]
