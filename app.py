@@ -52,6 +52,7 @@ try:
 except Exception:
     MUTE_ENTITIES = []
 
+ETHERSCAN_KEY = SECRETS.get("apis", {}).get("XYMGS7SSPMAUS77ZC8X4AKZU6WGTZHT5V5", "")
 COVALENT_KEY = SECRETS.get("apis", {}).get("COVALENT_KEY", "")
 URLSCAN_KEY = SECRETS.get("apis", {}).get("URLSCAN_KEY", "")
 BASESCAN_KEY = SECRETS.get("apis", {}).get("BASESCAN_KEY", "")
