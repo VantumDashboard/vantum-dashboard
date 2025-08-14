@@ -802,9 +802,16 @@ def dl_button(df, label, key):
     if df is None or df.empty:
         return
     safe_df = df.copy()
-    for c in safe_df.columns:
-        if isinstance(safe_df[c].dtype, pd.api.types.ExtensionDtype):
-            safe_df[c] = safe_df[c].astype(str)
+    # Optional: only needed if you ever hit CSV serialization quirks
+    try:
+        from pandas.api.types import is_extension_array_dtype
+        for c in safe_df.columns:
+            if is_extension_array_dtype(safe_df[c].dtype):
+                safe_df[c] = safe_df[c].astype(object).astype(str)
+    except Exception:
+        # If pandas version doesn’t have the helper, just proceed; to_csv handles most dtypes fine.
+        pass
+
     st.download_button(
         label=label,
         data=safe_df.to_csv(index=False).encode("utf-8"),
