@@ -52,7 +52,8 @@ try:
 except Exception:
     MUTE_ENTITIES = []
 
-ETHERSCAN_KEY = SECRETS.get("apis", {}).get("XYMGS7SSPMAUS77ZC8X4AKZU6WGTZHT5V5", "")
+# API keys (unified Etherscan-family key + fallbacks)
+ETHERSCAN_KEY = SECRETS.get("apis", {}).get("ETHERSCAN_KEY", "")  # FIXED: correct key name
 COVALENT_KEY = SECRETS.get("apis", {}).get("COVALENT_KEY", "")
 URLSCAN_KEY = SECRETS.get("apis", {}).get("URLSCAN_KEY", "")
 BASESCAN_KEY = SECRETS.get("apis", {}).get("BASESCAN_KEY", "")
@@ -74,10 +75,14 @@ CHAIN_IDS = {
     "optimism": 10,
 }
 
-# Etherscan-family explorer endpoints (free)
+# Etherscan-family explorer endpoints (unified key supported across networks)
 CHAIN_SCANS = {
-    "base": {"url": "https://api.basescan.org/api", "key": BASESCAN_KEY},
-    "arbitrum": {"url": "https://api.arbiscan.io/api", "key": ARBISCAN_KEY},
+    "base":     {"url": "https://api.basescan.org/api",              "key": BASESCAN_KEY or ETHERSCAN_KEY},
+    "arbitrum": {"url": "https://api.arbiscan.io/api",               "key": ARBISCAN_KEY or ETHERSCAN_KEY},
+    "ethereum": {"url": "https://api.etherscan.io/api",              "key": ETHERSCAN_KEY},
+    # Enable if you monitor these chains (uses the same ETHERSCAN_KEY by default)
+    "optimism": {"url": "https://api-optimistic.etherscan.io/api",   "key": ETHERSCAN_KEY},
+    "polygon":  {"url": "https://api.polygonscan.com/api",           "key": ETHERSCAN_KEY},
 }
 
 # Public explorer TX URL bases for evidence links
@@ -147,11 +152,11 @@ min_tx_usd = st.sidebar.number_input("Minimum transfer to include (USD)", min_va
 
 if use_live:
     if has_scan:
-        st.sidebar.success("Data source: Block explorers (BaseScan/Arbiscan)")
+        st.sidebar.success("Data source: Etherscan family (Base/Arbitrum/Ethereum)")
     elif has_covalent:
         st.sidebar.success("Data source: Covalent")
     else:
-        st.sidebar.warning("No API keys found. Add Covalent or BaseScan/Arbiscan keys in Secrets.")
+        st.sidebar.warning("No API keys found. Add ETHERSCAN_KEY or Covalent key in Secrets.")
 
 # Alerts setup
 st.sidebar.title("Alerts")
@@ -180,7 +185,6 @@ with st.sidebar.expander("Debug"):
 def _get_query_params():
     try:
         qp = st.query_params
-        # st.query_params may act like a dict of lists
         return {k: v if isinstance(v, list) else [v] for k, v in dict(qp).items()}
     except Exception:
         try:
@@ -195,6 +199,10 @@ qp_chains = [str(x).lower() for x in (_qp.get("chains") or [])]
 qp_window = str((_qp.get("window") or [""])[0]).lower()
 
 # ---------- Helpers ----------
+def link_col(label: str):
+    # Fallback to TextColumn if LinkColumn is not supported in your Streamlit version
+    return getattr(st.column_config, "LinkColumn", st.column_config.TextColumn)(label)
+
 def load_csv(path: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(path)
@@ -728,7 +736,7 @@ else:
 # Health and freshness indicators
 st.sidebar.caption(f"Last updated: {last_updated:%Y-%m-%d %H:%M UTC}")
 srcs = []
-if has_scan: srcs.append("Explorers")
+if has_scan: srcs.append("Etherscan family")
 if has_covalent: srcs.append("Covalent")
 if URLSCAN_KEY: srcs.append("URLScan")
 st.sidebar.caption("Sources: " + (", ".join(srcs) if srcs else "None"))
@@ -797,17 +805,19 @@ fs = tag_watch(fs)
 fr = tag_watch(fr)
 al = tag_watch(al)
 
-# CSV download helper
+# CSV download helper (robust to older pandas versions)
 def dl_button(df, label, key):
     if df is None or df.empty:
         return
     safe_df = df.copy()
-    # Optional: only needed if you ever hit CSV serialization quirks
     try:
         from pandas.api.types import is_extension_array_dtype
         for c in safe_df.columns:
-            if is_extension_array_dtype(safe_df[c].dtype):
-                safe_df[c] = safe_df[c].astype(object).astype(str)
+            try:
+                if is_extension_array_dtype(safe_df[c].dtype):
+                    safe_df[c] = safe_df[c].astype(object).astype(str)
+            except Exception:
+                continue
     except Exception:
         # If pandas version doesn’t have the helper, just proceed; to_csv handles most dtypes fine.
         pass
@@ -866,7 +876,7 @@ with tab_flows:
         st.dataframe(
             fs.sort_values("ts", ascending=False)[show_cols],
             use_container_width=True,
-            column_config={"evidence_url": st.column_config.LinkColumn("Evidence")}
+            column_config={"evidence_url": link_col("Evidence")}
         )
         dl_button(fs.sort_values("ts", ascending=False)[show_cols], "Download spikes CSV", "spikes_csv")
     else:
@@ -895,9 +905,10 @@ with tab_domains:
         st.dataframe(
             dm.sort_values("first_seen", ascending=False)[show_cols_d],
             use_container_width=True,
-            column_config={"urlscan_url": st.column_config.LinkColumn("URLScan Report")}
+            column_config={"urlscan_url": link_col("URLScan Report")}
         )
-        dl_button(dm.sort_values("first_seen", descending=False) if hasattr(dm.sort_values, "__call__") else dm, "Download domains CSV", "domains_csv")
+        # FIXED: ascending keyword (no "descending" param)
+        dl_button(dm.sort_values("first_seen", ascending=True), "Download domains CSV", "domains_csv")
     else:
         st.info("No domain matches yet. Set client NAME or BRAND_TERMS_JSON in Secrets and ensure URLScan key is present.")
 
@@ -908,7 +919,7 @@ with tab_alerts:
         st.dataframe(
             al.sort_values("ts", ascending=False)[show_cols_a],
             use_container_width=True,
-            column_config={"evidence_url": st.column_config.LinkColumn("Evidence")}
+            column_config={"evidence_url": link_col("Evidence")}
         )
         dl_button(al.sort_values("ts", ascending=False)[show_cols_a], "Download alerts CSV", "alerts_csv")
     else:
